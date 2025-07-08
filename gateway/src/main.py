@@ -22,7 +22,7 @@ logging.basicConfig(
 logger = logging.getLogger("gateway")
 
 # --------------------------------------------------
-# Conexão Redis Robusta
+# Conexão Redis 
 # --------------------------------------------------
 def get_redis_connection():
     """Estabelece conexão com Redis com fallback automático"""
@@ -49,7 +49,7 @@ def get_redis_connection():
             logger.warning(f" Falha ao conectar em {host}: {str(e)}")
             continue
     
-    logger.error("❌ Não foi possível conectar a nenhum host Redis")
+    logger.error("Não foi possível conectar a nenhum host Redis")
     return None
 
 r = get_redis_connection()

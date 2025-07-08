@@ -20,7 +20,7 @@ logging.basicConfig(
 logger = logging.getLogger("retriever")
 
 # --------------------------------------------------
-# Configuração Redis Robusta
+# Configuração Redis 
 # --------------------------------------------------
 def get_redis_connection():
     """Estabelece conexão com Redis com fallback automático"""
@@ -72,7 +72,7 @@ logger.info("Inicializando índice vetorial...")
 index = hnswlib.Index(space='cosine', dim=384)
 index.init_index(max_elements=1000, ef_construction=200, M=16)
 
-# Dados de exemplo (substitua pelos seus documentos)
+# Dados de exemplo 
 documents = [
     "Python é uma linguagem de programação interpretada de alto nível",
     "Herança permite que uma classe herde atributos e métodos de outra",
