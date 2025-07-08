@@ -1,0 +1,56 @@
+version: '3.9'
+
+services:
+  redis:
+    image: redis:alpine
+    ports:
+      - "6379:6379"
+    networks:
+      - rag-net
+
+  gateway:
+    build:
+      context: ./gateway
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - REDIS_HOST=redis
+      - LOG_LEVEL=${LOG_LEVEL}
+    depends_on:
+      - redis
+    networks:
+      - rag-net
+
+  retriever:
+    build:
+      context: ./retriever
+      dockerfile: Dockerfile
+    environment:
+      - REDIS_HOST=redis
+      - LOG_LEVEL=${LOG_LEVEL}
+    depends_on:
+      - redis
+    networks:
+      - rag-net
+
+  generator:
+    build:
+      context: ./generator
+      dockerfile: Dockerfile
+    environment:
+      - REDIS_HOST=redis
+      - MODEL_PATH=${MODEL_PATH}
+      - N_CTX=${N_CTX}
+      - N_THREADS=${N_THREADS}
+      - LOG_LEVEL=${LOG_LEVEL}
+    volumes:
+      - ./generator/models:/app/models
+    depends_on:
+      - redis
+    networks:
+      - rag-net
+
+networks:
+  rag-net:
+    driver: bridge

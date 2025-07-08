@@ -1,0 +1,10 @@
+**/.git
+**/.gitignore
+**/.dockerignore
+**/__pycache__
+**/.env
+**/.venv
+**/tests
+Dockerfile
+docker-compose.yml
+README.md

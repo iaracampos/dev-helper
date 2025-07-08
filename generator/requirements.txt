@@ -1,0 +1,4 @@
+redis==5.0.0
+llama-cpp-python==0.2.23
+python-dotenv==1.0.0
+python-dotenv==1.0.0

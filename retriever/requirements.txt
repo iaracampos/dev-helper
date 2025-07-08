@@ -1,0 +1,5 @@
+redis==5.0.0
+sentence-transformers==2.6.1
+hnswlib==0.8.0
+numpy==1.26.4
+python-dotenv==1.0.0
