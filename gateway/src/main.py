@@ -51,26 +51,57 @@ async def ask_question(q: Question):
         "k": q.k,
         "status": "pending"
     }
-    # Publica a pergunta no canal
+   
     r.publish("questions_channel", json.dumps(request_data))
-    # Salva a requisição para controle
-    r.set(f"request:{request_id}", json.dumps(request_data), ex=300)
 
-    # Espera resposta com timeout (até 30 segundos)
-    for _ in range(30):
-        await asyncio.sleep(1)
+    r.set(f"request:{request_id}", json.dumps(request_data), ex=3600)
+
+   
+    max_attempts = 360  
+    for attempt in range(max_attempts):
+        await asyncio.sleep(5)  
         response = r.get(f"response:{request_id}")
         if response:
             response_data = json.loads(response)
-            logger.info(f"Resposta recebida (ID: {request_id})")
+            logger.info(f"Resposta recebida (ID: {request_id}) após {attempt * 5} segundos")
             return {
                 "id": request_id,
                 "question": response_data.get("question"),
                 "contexts": response_data.get("contexts"),
-                "answer": response_data.get("answer", "Sem resposta gerada")
+                "answer": response_data.get("answer", "Sem resposta gerada"),
+                "processing_time": f"{attempt * 5} segundos"
             }
+        
+        
+        if attempt % 12 == 0: 
+            logger.info(f"Aguardando resposta (ID: {request_id}) - {attempt // 12} minutos decorridos")
 
-    raise HTTPException(status_code=504, detail="Timeout aguardando resposta")
+    raise HTTPException(
+        status_code=504, 
+        detail="Timeout após 30 minutos aguardando resposta. O processamento pode estar demorando mais que o normal."
+    )
+
+@app.get("/status/{request_id}")
+async def check_status(request_id: str):
+    """Endpoint para verificar o status de uma requisição específica"""
+    request_data = r.get(f"request:{request_id}")
+    if not request_data:
+        raise HTTPException(status_code=404, detail="Requisição não encontrada ou expirada")
+    
+    request_data = json.loads(request_data)
+    response_data = r.get(f"response:{request_id}")
+    
+    if response_data:
+        response_data = json.loads(response_data)
+        return {
+            "status": "completed",
+            "response": response_data
+        }
+    else:
+        return {
+            "status": request_data.get("status", "pending"),
+            "message": "A requisição ainda está sendo processada"
+        }
 
 @app.get("/health")
 async def health_check():

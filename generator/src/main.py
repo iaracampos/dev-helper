@@ -1,142 +1,178 @@
-
 import json
 import logging
 import os
 import socket
 import time
+import uuid
 from pathlib import Path
 import redis
 from dotenv import load_dotenv
 from llama_cpp import Llama
 
-
+# Configuração inicial
 load_dotenv()
 
+# Configuração de logging
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger("generator")
 
-
+# Conexão com Redis
 def connect_redis() -> redis.Redis:
-   
-    for host in ("redis", "localhost", "127.0.0.1", "host.docker.internal"):
+    redis_hosts = ["redis", "localhost", "127.0.0.1", "host.docker.internal"]
+    redis_port = int(os.getenv("REDIS_PORT", 6379))
+    
+    for host in redis_hosts:
         try:
             r = redis.Redis(
                 host=host,
-                port=int(os.getenv("REDIS_PORT", 6379)),
+                port=redis_port,
                 db=0,
                 socket_connect_timeout=5,
+                socket_keepalive=True
             )
             if r.ping():
-                logger.info("Conectado ao Redis em %s", host)
+                logger.info(f"Conectado ao Redis em {host}:{redis_port}")
                 return r
-        except (redis.ConnectionError, socket.gaierror):
-            logger.debug("Falha ao conectar em %s", host, exc_info=True)
-    logger.critical("Não foi possível conectar a nenhum host Redis.")
-    raise SystemExit(1)
+        except (redis.ConnectionError, socket.gaierror) as e:
+            logger.debug(f"Falha ao conectar em {host}: {str(e)}")
+    
+    logger.critical("Não foi possível conectar a nenhum host Redis")
+    raise RuntimeError("Conexão com Redis falhou")
 
-
-redis_conn = connect_redis()
-pubsub = redis_conn.pubsub()
-pubsub.subscribe("generator_channel")
-
-
-docker_model = Path("/app/models/mistral.gguf")
-repo_model = Path(__file__).resolve().parent.parent / "models" / "mistral.gguf"
-
-MODEL_PATH = Path(os.getenv("MODEL_PATH", docker_model))
-if not MODEL_PATH.exists():
-    MODEL_PATH = repo_model  
-
-N_CTX = int(os.getenv("N_CTX", 2_048))
-N_THREADS = int(os.getenv("N_THREADS", os.cpu_count() or 4))
-N_GPU_LAYERS = int(os.getenv("N_GPU_LAYERS", 0))
-
-
+# Carregamento do Modelo
 def load_model() -> Llama:
-    if not MODEL_PATH.exists():
-        logger.critical("Arquivo do modelo não encontrado: %s", MODEL_PATH)
-        raise SystemExit(1)
+    # Configuração de paths do modelo
+    docker_model = Path("/app/models/mistral.gguf")
+    local_model = Path(__file__).parent.parent / "models" / "mistral.gguf"
+    model_path = Path(os.getenv("MODEL_PATH", docker_model))
+    
+    if not model_path.exists():
+        model_path = local_model
+    
+    if not model_path.exists():
+        logger.critical(f"Arquivo do modelo não encontrado: {model_path}")
+        raise FileNotFoundError(f"Modelo não encontrado em {model_path}")
 
-    logger.info("Carregando modelo: %s", MODEL_PATH)
+    logger.info(f"Carregando modelo: {model_path}")
+    
     return Llama(
-        model_path=str(MODEL_PATH),
-        n_ctx=N_CTX,
-        n_threads=N_THREADS,
-        n_gpu_layers=N_GPU_LAYERS,
-        verbose=False,
+        model_path=str(model_path),
+        n_ctx=int(os.getenv("N_CTX", 2048)),
+        n_threads=int(os.getenv("N_THREADS", max(os.cpu_count() or 4, 4))),
+        n_gpu_layers=int(os.getenv("N_GPU_LAYERS", 0)),
+        verbose=False
     )
 
-
-llm = load_model()
-
-STOP_TOKENS = ["~~", "[INST]"]
-
-
-def build_prompt(question: str, contexts: list[str]) -> str:
-    ctx = "\n".join(contexts)
-    return (
-        "~~[INST] <> Você é um assistente técnico especializado em desenvolvimento de software.\n"
-        "Responda apenas com base no CONTEXTO abaixo. Seja conciso e, se não souber, diga "
-        '"Não posso ajudar com isso".\n'
-        f"<> CONTEXTO:\n{ctx}\n\nPERGUNTA: {question}\n[/INST]"
-    )
-
-
-def generate(prompt: str) -> str:
+# Geração de Resposta
+def generate_response(llm: Llama, prompt: str) -> str:
     try:
-        out = llm(
+        output = llm(
             prompt,
             max_tokens=512,
             temperature=0.7,
             top_p=0.9,
-            stop=STOP_TOKENS,
-            echo=False,
+            stop=["~~", "[INST]"],
+            echo=False
         )
-        return out["choices"][0]["text"].strip()
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("Erro na geração: %s", exc)
-        return "Erro ao gerar resposta."
+        return output["choices"][0]["text"].strip()
+    except Exception as e:
+        logger.error(f"Erro na geração: {str(e)}")
+        return f"Erro ao gerar resposta: {str(e)}"
 
+# Construção do Prompt
+def build_prompt(question: str, contexts: list[str] = None) -> str:
+    context = "\n".join(contexts) if contexts else "Nenhum contexto fornecido"
+    return f"""~~[INST] <> Você é um assistente técnico especializado em desenvolvimento de software.
+Responda apenas com base no CONTEXTO abaixo. Seja conciso e, se não souber, diga "Não posso ajudar com isso".
+<> CONTEXTO:
+{context}
 
+PERGUNTA: {question}
+[/INST]"""
 
-logger.info("Generator iniciado ― aguardando mensagens…")
+# Processamento Principal
+def main():
+    # Inicializa conexões
+    redis_conn = connect_redis()
+    llm = load_model()
+    
+    # Configura subscription
+    pubsub = redis_conn.pubsub()
+    pubsub.subscribe("questions_channel")
+    logger.info("Generator pronto - ouvindo no canal 'questions_channel'")
 
-for msg in pubsub.listen():
-    if msg["type"] != "message":
-        continue
+    # Loop principal
+    for message in pubsub.listen():
+        if message["type"] != "message":
+            continue
 
+        try:
+            start_time = time.time()
+            payload = json.loads(message["data"])
+            
+            # Extrai dados da mensagem
+            request_id = payload.get("id", str(uuid.uuid4()))
+            question = payload["question"]
+            k = payload.get("k", 3)
+            contexts = payload.get("contexts", [])
+            
+            logger.info(f"Processando ID {request_id}: {question[:50]}...")
+
+            # Gera resposta
+            prompt = build_prompt(question, contexts)
+            answer = generate_response(llm, prompt)
+            processing_time = time.time() - start_time
+
+            # Envia resposta
+            response_data = {
+                "id": request_id,
+                "question": question,
+                "contexts": contexts,
+                "answer": answer,
+                "processing_time": round(processing_time, 2),
+                "status": "completed"
+            }
+            
+            redis_conn.setex(
+                f"response:{request_id}",
+                time=3600,  
+                value=json.dumps(response_data)
+            )
+            
+            logger.info(f"Resposta para ID {request_id} pronta em {processing_time:.2f}s")
+
+        except json.JSONDecodeError:
+            logger.error("Mensagem JSON inválida recebida")
+        except KeyError as e:
+            logger.error(f"Campo obrigatório faltando: {str(e)}")
+            redis_conn.setex(
+                f"response:{request_id}",
+                time=3600,
+                value=json.dumps({
+                    "id": request_id,
+                    "error": f"Campo obrigatório faltando: {str(e)}",
+                    "status": "failed"
+                })
+            )
+        except Exception as e:
+            logger.error(f"Erro inesperado: {str(e)}", exc_info=True)
+            redis_conn.setex(
+                f"response:{request_id}",
+                time=3600,
+                value=json.dumps({
+                    "id": request_id,
+                    "error": str(e),
+                    "status": "failed"
+                })
+            )
+
+if __name__ == "__main__":
     try:
-        start = time.perf_counter()
-        payload = json.loads(msg["data"])
-
-        req_id: str = payload["id"]
-        question: str = payload["question"]
-        contexts: list[str] = payload["contexts"]
-
-        logger.info("ID %s ─ processando ‘%s…’", req_id, question[:60])
-
-        answer = generate(build_prompt(question, contexts))
-        elapsed = time.perf_counter() - start
-
-        redis_conn.set(
-            f"response:{req_id}",
-            json.dumps(
-                {
-                    "id": req_id,
-                    "question": question,
-                    "answer": answer,
-                    "status": "completed",
-                    "elapsed": elapsed,
-                }
-            ),
-            ex=300,
-        )
-        logger.info("ID %s ─ resposta pronta em %.2fs", req_id, elapsed)
-
-    except json.JSONDecodeError:
-        logger.error("Mensagem JSON inválida recebida: %s", msg)
-    except Exception: 
-        logger.exception("Erro inesperado no loop principal")
+        main()
+    except KeyboardInterrupt:
+        logger.info("Generator encerrado pelo usuário")
+    except Exception as e:
+        logger.critical(f"Falha crítica: {str(e)}", exc_info=True)

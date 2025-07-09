@@ -74,18 +74,18 @@ def main():
                 contexts = retrieve_contexts(question, k)
                 logger.info(f"Contextos encontrados: {len(contexts)}")
 
-                response = {
+                payload = {
                     "id": request_id,
                     "question": question,
                     "contexts": contexts,
-                    "answer": "Resposta fictícia gerada pelo generator (substituir aqui se quiser)"
                 }
 
-                r.set(f"response:{request_id}", json.dumps(response), ex=300)
-                logger.info(f"Resposta publicada no Redis para (ID: {request_id})")
+                r.publish("generator_channel", json.dumps(payload))
+                logger.info(f"Contextos enviados ao Generator (ID: {request_id})")
 
             except Exception as e:
                 logger.error(f"Erro ao processar mensagem: {str(e)}", exc_info=True)
 
+
 if __name__ == "__main__":
-    main()
+    uvicorn.run(app, host="0.0.0.0", port=8001)
