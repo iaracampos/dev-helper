@@ -45,6 +45,8 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     depends_on:
       - redis
+    ports:
+    - "8001:8001"   
     networks:
       - rag-net
 
