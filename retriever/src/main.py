@@ -1,23 +1,10 @@
-"""
-retriever/src/main.py
-======================
-Módulo de busca vetorial para o Dev Helper (RAG).
 
-• Carrega ou constrói um índice HNSWlib
-• Usa SentenceTransformer para gerar embeddings
-• Armazena metadados ⟺ ID de vetor em meta.json
-• Pode usar Redis para cachear embeddings / contextos
-
-Autor: Iara Campos (adaptado)
-"""
 from __future__ import annotations
-
 import json
 import logging
 import os
 from pathlib import Path
 from typing import Dict, List, Tuple
-
 import hnswlib
 import numpy as np
 import redis
@@ -25,7 +12,7 @@ from dotenv import load_dotenv
 from sentence_transformers import SentenceTransformer
 
 
-load_dotenv()  # carrega .env no ambiente
+load_dotenv()  
 
 EMB_MODEL_NAME: str = os.getenv("EMB_MODEL_NAME", "sentence-transformers/all-MiniLM-L6-v2")
 INDEX_PATH: Path = Path(os.getenv("INDEX_PATH", "index/hnswlib_index.bin"))
@@ -46,7 +33,7 @@ def _connect_redis() -> redis.Redis | None:
     """Tenta conectar no Redis; devolve None se não conseguir."""
     try:
         r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB, decode_responses=True)
-        # faz um ping para garantir que está vivo
+        # faz um ping 
         r.ping()
         logger.info("Conectado ao Redis em %s:%s (db=%s)", REDIS_HOST, REDIS_PORT, REDIS_DB)
         return r
@@ -119,17 +106,16 @@ class Retriever:
         else:
             query_emb = self.model.encode(query, convert_to_numpy=True)
             if self.redis is not None:
-                # serializa como JSON (lista de floats, mais compacto que pickle)
+
                 self.redis.set(qkey, json.dumps(query_emb.tolist()))
 
         # busca no índice
         labels, distances = self.index.knn_query(query_emb, k=top_k)
-        # hnswlib devolve arrays 2‑D; pegamos a primeira linha
+        
         labels, distances = labels[0], distances[0]
 
         results: List[Tuple[float, Dict]] = []
         for label, dist in zip(labels, distances):
-            # menor distância → maior similiradade; convertendo para score ≈ (1 - dist)
             score = 1 - dist
             meta = self.meta.get(int(label), {})
             results.append((score, meta))
@@ -169,7 +155,7 @@ class Retriever:
         self.index.save_index(str(INDEX_PATH))
         logger.info("Índice salvo em %s", INDEX_PATH)
 
-        # opcional: salva embeddings no Redis para acelerar futuras buscas
+    
         if self.redis is not None:
             pipe = self.redis.pipeline(True)
             for text, emb in zip((m["text"] for m in self.meta.values()), embeddings):
@@ -179,30 +165,4 @@ class Retriever:
 
 
 
-if __name__ == "__main__":
-    import argparse
-    import sys
-
-    parser = argparse.ArgumentParser(description="Busca interativa no índice HNSWlib.")
-    parser.add_argument("-k", "--top_k", type=int, default=TOP_K_DEFAULT, help="nº de resultados a retornar")
-    parser.add_argument(
-        "--rebuild",
-        action="store_true",
-        help="Ignora o índice salvo e reconstrói a partir de meta.json (útil após nova ingestão).",
-    )
-    args = parser.parse_args()
-
-    try:
-        retriever = Retriever(rebuild_if_missing=args.rebuild)
-    except FileNotFoundError as exc:
-        logger.error(exc)
-        sys.exit(1)
-
-    print("\nDigite sua consulta (ou 'exit' para sair):")
-    while True:
-        question = input("🡒 ").strip()
-        if question.lower() in {"exit", "quit"}:
-            break
-        for score, meta in retriever.search(question, top_k=args.top_k):
-            print(f"[score={score:.3f}] {meta.get('source', '')} → {meta.get('text', '')[:120]}…")
-        print("-" * 80)
+    
