@@ -1,91 +1,208 @@
-import os
+"""
+retriever/src/main.py
+======================
+Módulo de busca vetorial para o Dev Helper (RAG).
+
+• Carrega ou constrói um índice HNSWlib
+• Usa SentenceTransformer para gerar embeddings
+• Armazena metadados ⟺ ID de vetor em meta.json
+• Pode usar Redis para cachear embeddings / contextos
+
+Autor: Iara Campos (adaptado)
+"""
+from __future__ import annotations
+
 import json
 import logging
-import redis
-import numpy as np
-from sentence_transformers import SentenceTransformer
-import hnswlib
-from dotenv import load_dotenv
+import os
+from pathlib import Path
+from typing import Dict, List, Tuple
 
-load_dotenv()
+import hnswlib
+import numpy as np
+import redis
+from dotenv import load_dotenv
+from sentence_transformers import SentenceTransformer
+
+
+load_dotenv()  # carrega .env no ambiente
+
+EMB_MODEL_NAME: str = os.getenv("EMB_MODEL_NAME", "sentence-transformers/all-MiniLM-L6-v2")
+INDEX_PATH: Path = Path(os.getenv("INDEX_PATH", "index/hnswlib_index.bin"))
+META_PATH: Path = Path(os.getenv("META_PATH", "index/meta.json"))
+REDIS_HOST: str = os.getenv("REDIS_HOST", "localhost")
+REDIS_PORT: int = int(os.getenv("REDIS_PORT", 6379))
+REDIS_DB: int = int(os.getenv("REDIS_DB", 0))
+TOP_K_DEFAULT: int = int(os.getenv("TOP_K", 5))
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger("retriever")
 
-def get_redis_connection():
-    redis_host = os.getenv("REDIS_HOST", "redis")
+
+def _connect_redis() -> redis.Redis | None:
+    """Tenta conectar no Redis; devolve None se não conseguir."""
     try:
-        conn = redis.Redis(host=redis_host, port=6379, db=0,
-                           socket_connect_timeout=5, socket_keepalive=True)
-        if conn.ping():
-            logger.info(f"Conectado ao Redis em: {redis_host}")
-            return conn
-    except redis.ConnectionError as e:
-        logger.error(f"Erro de conexão Redis: {e}")
-    return None
+        r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB, decode_responses=True)
+        # faz um ping para garantir que está vivo
+        r.ping()
+        logger.info("Conectado ao Redis em %s:%s (db=%s)", REDIS_HOST, REDIS_PORT, REDIS_DB)
+        return r
+    except redis.exceptions.ConnectionError as exc:
+        logger.warning("Redis indisponível: %s", exc)
+        return None
 
-r = get_redis_connection()
-if not r:
-    exit(1)
 
-pubsub = r.pubsub()
-pubsub.subscribe("questions_channel")
+def _load_metadata() -> Dict[int, Dict]:
+    if not META_PATH.exists():
+        logger.warning("Arquivo de metadados %s não encontrado; retornando dicionário vazio.", META_PATH)
+        return {}
+    with META_PATH.open("r", encoding="utf-8") as fh:
+        data = json.load(fh)
+    # converte chaves para int (hnswlib retorna int IDs)
+    return {int(k): v for k, v in data.items()}
 
-logger.info("Carregando modelo de embeddings...")
-model = SentenceTransformer('all-MiniLM-L6-v2')
-logger.info("Modelo de embeddings carregado")
 
-logger.info("Inicializando índice vetorial...")
-index = hnswlib.Index(space='cosine', dim=384)
-index.init_index(max_elements=1000, ef_construction=200, M=16)
+def _save_metadata(meta: Dict[int, Dict]) -> None:
+    META_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with META_PATH.open("w", encoding="utf-8") as fh:
+        json.dump(meta, fh, ensure_ascii=False, indent=2)
 
-documents = [
-    "Python é uma linguagem de programação interpretada de alto nível",
-    "Herança permite que uma classe herde atributos e métodos de outra",
-    "Docker é uma plataforma para criar e gerenciar containers",
-    "FastAPI é um framework web moderno para construir APIs em Python",
-    "Um decorador em Python modifica o comportamento de funções"
-]
 
-embeddings = model.encode(documents)
-index.add_items(embeddings, np.arange(len(documents)))
-logger.info(f"Índice vetorial pronto com {len(documents)} documentos")
 
-def retrieve_contexts(query: str, k: int = 3):
-    query_embedding = model.encode([query])[0]
-    labels, _ = index.knn_query(query_embedding, k=k)
-    return [documents[label] for label in labels[0]]
 
-def main():
-    logger.info("Serviço Retriever pronto. Aguardando perguntas...")
-    for message in pubsub.listen():
-        if message['type'] == 'message':
-            try:
-                data = json.loads(message['data'])
-                request_id = data['id']
-                question = data['question']
-                k = data.get('k', 3)
+class Retriever:
 
-                logger.info(f"Processando pergunta (ID: {request_id}): {question}")
+    def __init__(self, rebuild_if_missing: bool = False):
+        # modelo de embeddings
+        self.model = SentenceTransformer(EMB_MODEL_NAME)
 
-                contexts = retrieve_contexts(question, k)
-                logger.info(f"Contextos encontrados: {len(contexts)}")
+        # emb_dim é inferido pelo modelo
+        self.emb_dim: int = self.model.get_sentence_embedding_dimension()
 
-                payload = {
-                    "id": request_id,
-                    "question": question,
-                    "contexts": contexts,
-                }
+        # tenta conectar ao Redis 
+        self.redis = _connect_redis()
 
-                r.publish("generator_channel", json.dumps(payload))
-                logger.info(f"Contextos enviados ao Generator (ID: {request_id})")
+        # metadados {internal_id: {"text": ..., "source": ...}}
+        self.meta: Dict[int, Dict] = _load_metadata()
 
-            except Exception as e:
-                logger.error(f"Erro ao processar mensagem: {str(e)}", exc_info=True)
+        # índice vetorial
+        self.index = hnswlib.Index(space="cosine", dim=self.emb_dim)
+
+        if INDEX_PATH.exists():
+            logger.info("Carregando índice de %s ...", INDEX_PATH)
+            self.index.load_index(str(INDEX_PATH))
+            self.index.set_ef(64)
+        elif rebuild_if_missing:
+            logger.info("Índice não encontrado. Reconstruindo do zero ...")
+            # não temos embeddings salvos; gere a partir dos metadados
+            self._rebuild_index()
+        else:
+            raise FileNotFoundError(
+                f"Índice {INDEX_PATH} não encontrado. "
+                "Passe rebuild_if_missing=True para reconstruir ou execute o script de ingestão."
+            )
+    def search(self, query: str, top_k: int = TOP_K_DEFAULT) -> List[Tuple[float, Dict]]:
+        """
+        Devolve uma lista de (score, metadata) ordenada pelo melhor score.
+        """
+        if not query.strip():
+            return []
+
+        # Embedding da pergunta (usa Redis como cache se possível)
+        qkey = f"emb:{query}"
+        if self.redis is not None and self.redis.exists(qkey):
+            query_emb = np.array(json.loads(self.redis.get(qkey)), dtype=np.float32)
+            logger.debug("Embedding de consulta recuperado do Redis.")
+        else:
+            query_emb = self.model.encode(query, convert_to_numpy=True)
+            if self.redis is not None:
+                # serializa como JSON (lista de floats, mais compacto que pickle)
+                self.redis.set(qkey, json.dumps(query_emb.tolist()))
+
+        # busca no índice
+        labels, distances = self.index.knn_query(query_emb, k=top_k)
+        # hnswlib devolve arrays 2‑D; pegamos a primeira linha
+        labels, distances = labels[0], distances[0]
+
+        results: List[Tuple[float, Dict]] = []
+        for label, dist in zip(labels, distances):
+            # menor distância → maior similiradade; convertendo para score ≈ (1 - dist)
+            score = 1 - dist
+            meta = self.meta.get(int(label), {})
+            results.append((score, meta))
+
+        return results
+
+    def get_contexts(self, query: str, top_k: int = TOP_K_DEFAULT) -> List[str]:
+        """Retorna somente os textos (campo 'text') dos documentos mais próximos."""
+        return [m.get("text", "") for _, m in self.search(query, top_k)]
+
+
+    def _rebuild_index(self) -> None:
+        """Reconstrói o índice a partir de `self.meta`."""
+        if not self.meta:
+            raise RuntimeError(
+                "Não há metadados para reconstruir o índice. "
+                "Execute o script de ingestão primeiro."
+            )
+
+        embeddings = []
+        ids = []
+        for internal_id, m in self.meta.items():
+            text = m.get("text", "")
+            emb = self.model.encode(text, convert_to_numpy=True)
+            embeddings.append(emb)
+            ids.append(internal_id)
+
+        emb_matrix = np.vstack(embeddings).astype(np.float32)
+
+        # inicializa e treina o índice
+        self.index.init_index(max_elements=len(ids), ef_construction=200, M=16)
+        self.index.add_items(emb_matrix, ids)
+        self.index.set_ef(64)
+
+        # salva no disco
+        INDEX_PATH.parent.mkdir(parents=True, exist_ok=True)
+        self.index.save_index(str(INDEX_PATH))
+        logger.info("Índice salvo em %s", INDEX_PATH)
+
+        # opcional: salva embeddings no Redis para acelerar futuras buscas
+        if self.redis is not None:
+            pipe = self.redis.pipeline(True)
+            for text, emb in zip((m["text"] for m in self.meta.values()), embeddings):
+                pipe.set(f"emb:{text}", json.dumps(emb.tolist()))
+            pipe.execute()
+            logger.info("Embeddings salvos em cache Redis.")
+
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8001)
+    import argparse
+    import sys
+
+    parser = argparse.ArgumentParser(description="Busca interativa no índice HNSWlib.")
+    parser.add_argument("-k", "--top_k", type=int, default=TOP_K_DEFAULT, help="nº de resultados a retornar")
+    parser.add_argument(
+        "--rebuild",
+        action="store_true",
+        help="Ignora o índice salvo e reconstrói a partir de meta.json (útil após nova ingestão).",
+    )
+    args = parser.parse_args()
+
+    try:
+        retriever = Retriever(rebuild_if_missing=args.rebuild)
+    except FileNotFoundError as exc:
+        logger.error(exc)
+        sys.exit(1)
+
+    print("\nDigite sua consulta (ou 'exit' para sair):")
+    while True:
+        question = input("🡒 ").strip()
+        if question.lower() in {"exit", "quit"}:
+            break
+        for score, meta in retriever.search(question, top_k=args.top_k):
+            print(f"[score={score:.3f}] {meta.get('source', '')} → {meta.get('text', '')[:120]}…")
+        print("-" * 80)
