@@ -1,13 +1,56 @@
 version: '3.9'
 
 services:
+  # ------------------------------ #
+  # Redis      #
+  # ------------------------------ #
   redis:
-    image: redis:alpine
+    image: redis:7-alpine
+    restart: unless-stopped
     ports:
       - "6379:6379"
     networks:
       - rag-net
 
+  # ------------------------------ #
+  # Generator – Llama‑cpp          #
+  # ------------------------------ #
+  generator:
+    build:
+      context: ./generator
+      dockerfile: Dockerfile
+    environment:
+      - REDIS_HOST=redis
+      - MODEL_PATH=/app/models/mistral.gguf     # <- bate com o volume
+      - N_CTX=2048
+      - N_THREADS=4
+      - N_GPU_LAYERS=0
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      - ./generator/models:/app/models:ro       # <- só leitura
+    depends_on:
+      - redis
+    networks:
+      - rag-net
+
+  # ------------------------------ #
+  # Retriever – busca semântica    #
+  # ------------------------------ #
+  retriever:
+    build:
+      context: ./retriever
+      dockerfile: Dockerfile
+    environment:
+      - REDIS_HOST=redis
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    depends_on:
+      - redis
+    networks:
+      - rag-net
+
+  # ------------------------------ #
+  # Gateway – FastAPI              #
+  # ------------------------------ #
   gateway:
     build:
       context: ./gateway
@@ -16,36 +59,7 @@ services:
       - "8000:8000"
     environment:
       - REDIS_HOST=redis
-      - LOG_LEVEL=${LOG_LEVEL}
-    depends_on:
-      - redis
-    networks:
-      - rag-net
-
-  retriever:
-    build:
-      context: ./retriever
-      dockerfile: Dockerfile
-    environment:
-      - REDIS_HOST=redis
-      - LOG_LEVEL=${LOG_LEVEL}
-    depends_on:
-      - redis
-    networks:
-      - rag-net
-
-  generator:
-    build:
-      context: ./generator
-      dockerfile: Dockerfile
-    environment:
-      - REDIS_HOST=redis
-      - MODEL_PATH=${MODEL_PATH}
-      - N_CTX=${N_CTX}
-      - N_THREADS=${N_THREADS}
-      - LOG_LEVEL=${LOG_LEVEL}
-    volumes:
-      - ./generator/models:/app/models
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
     depends_on:
       - redis
     networks:

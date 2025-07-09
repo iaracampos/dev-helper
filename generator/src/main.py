@@ -1,151 +1,152 @@
-import os
+
 import json
 import logging
-import redis
+import os
 import socket
 import time
-from llama_cpp import Llama
+from pathlib import Path
+import redis
 from dotenv import load_dotenv
+from llama_cpp import Llama
 
-# Configuração inicial
+
 load_dotenv()
 
-# Configuração de logging
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger("generator")
 
-# --------------------------------------------------
-# Conexão Redis 
-# --------------------------------------------------
-def get_redis_connection():
-    """Estabelece conexão com Redis com fallback automático"""
-    hosts_to_try = [
-        'redis',
-        'localhost',
-        '127.0.0.1',
-        'host.docker.internal'
-    ]
-    
-    for host in hosts_to_try:
+# --------------------------------------------------------------------------- #
+# Redis                                                                       #
+# --------------------------------------------------------------------------- #
+def connect_redis() -> redis.Redis:
+    """Tenta vários hosts até conseguir uma conexão Redis válida."""
+    for host in ("redis", "localhost", "127.0.0.1", "host.docker.internal"):
         try:
-            conn = redis.Redis(
+            r = redis.Redis(
                 host=host,
-                port=6379,
+                port=int(os.getenv("REDIS_PORT", 6379)),
                 db=0,
                 socket_connect_timeout=5,
-                socket_keepalive=True
             )
-            if conn.ping():
-                logger.info(f" Conectado ao Redis em: {host}")
-                return conn
-        except (redis.ConnectionError, socket.gaierror) as e:
-            logger.warning(f"  Falha ao conectar em {host}: {str(e)}")
-            continue
-    
-    logger.error(" Não foi possível conectar a nenhum host Redis")
-    return None
+            if r.ping():
+                logger.info("Conectado ao Redis em %s", host)
+                return r
+        except (redis.ConnectionError, socket.gaierror):
+            logger.debug("Falha ao conectar em %s", host, exc_info=True)
+    logger.critical("Não foi possível conectar a nenhum host Redis.")
+    raise SystemExit(1)
 
-r = get_redis_connection()
-if not r:
-    exit(1)
 
-pubsub = r.pubsub()
+redis_conn = connect_redis()
+pubsub = redis_conn.pubsub()
 pubsub.subscribe("generator_channel")
 
-# --------------------------------------------------
-# Configuração do Modelo LLM
-# --------------------------------------------------
-MODEL_PATH = os.getenv("MODEL_PATH", "generator/models/mistral.gguf")
+# --------------------------------------------------------------------------- #
+# Modelo Llama‑cpp                                                            #
+# --------------------------------------------------------------------------- #
 
-def load_llm_model():
-    try:
-        if not os.path.exists(MODEL_PATH):
-            raise FileNotFoundError(f"Arquivo do modelo não encontrado: {MODEL_PATH}")
+docker_model = Path("/app/models/mistral.gguf")
+repo_model = Path(__file__).resolve().parent.parent / "models" / "mistral.gguf"
 
-        logger.info(f"Carregando modelo de: {MODEL_PATH}")
-        llm = Llama(
-            model_path=MODEL_PATH,
-            n_ctx=2048,
-            n_threads=4,
-            n_gpu_layers=0,
-            verbose=False
-        )
-        logger.info("\ Modelo carregado com sucesso!")
-        return llm
-    except Exception as e:
-        logger.error(f" Falha ao carregar modelo: {str(e)}")
-        exit(1)
+MODEL_PATH = Path(os.getenv("MODEL_PATH", docker_model))
+if not MODEL_PATH.exists():
+    MODEL_PATH = repo_model  
 
-llm = load_llm_model()
+N_CTX = int(os.getenv("N_CTX", 2_048))
+N_THREADS = int(os.getenv("N_THREADS", os.cpu_count() or 4))
+N_GPU_LAYERS = int(os.getenv("N_GPU_LAYERS", 0))
 
-# --------------------------------------------------
-# Funções Principais
-# --------------------------------------------------
+
+def load_model() -> Llama:
+    if not MODEL_PATH.exists():
+        logger.critical("Arquivo do modelo não encontrado: %s", MODEL_PATH)
+        raise SystemExit(1)
+
+    logger.info("Carregando modelo: %s", MODEL_PATH)
+    return Llama(
+        model_path=str(MODEL_PATH),
+        n_ctx=N_CTX,
+        n_threads=N_THREADS,
+        n_gpu_layers=N_GPU_LAYERS,
+        verbose=False,
+    )
+
+
+llm = load_model()
+
+# --------------------------------------------------------------------------- #
+# Helpers                                                                     #
+# --------------------------------------------------------------------------- #
+STOP_TOKENS = ["~~", "[INST]"]
+
+
 def build_prompt(question: str, contexts: list[str]) -> str:
-    """Constrói o prompt para o LLM"""
-    context_str = "\n".join(contexts)
-    return f"""<s>[INST] <<SYS>>
-Você é um assistente técnico especializado em desenvolvimento de software.
-Responda com base APENAS no contexto fornecido.
-Seja conciso e preciso. Se não souber, diga "Não posso ajudar com isso".
-<</SYS>>
+    ctx = "\n".join(contexts)
+    return (
+        "~~[INST] <> Você é um assistente técnico especializado em desenvolvimento de software.\n"
+        "Responda apenas com base no CONTEXTO abaixo. Seja conciso e, se não souber, diga "
+        '"Não posso ajudar com isso".\n'
+        f"<> CONTEXTO:\n{ctx}\n\nPERGUNTA: {question}\n[/INST]"
+    )
 
-Contexto:
-{context_str}
 
-Pergunta: {question} [/INST]"""
-
-def generate_response(prompt: str) -> str:
-    """Gera resposta com tratamento de erros"""
+def generate(prompt: str) -> str:
     try:
-        output = llm(
+        out = llm(
             prompt,
             max_tokens=512,
             temperature=0.7,
             top_p=0.9,
-            stop=["</s>", "[INST]"],
-            echo=False
+            stop=STOP_TOKENS,
+            echo=False,
         )
-        return output['choices'][0]['text'].strip()
-    except Exception as e:
-        logger.error(f"Erro na geração: {str(e)}")
-        return "Erro ao gerar resposta"
+        return out["choices"][0]["text"].strip()
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Erro na geração: %s", exc)
+        return "Erro ao gerar resposta."
 
-# --------------------------------------------------
-# Loop Principal
-# --------------------------------------------------
-logger.info("Generator pronto. Aguardando requisições...")
 
-for message in pubsub.listen():
-    if message['type'] == 'message':
-        try:
-            start_time = time.time()
-            data = json.loads(message['data'])
-            request_id = data['id']
-            question = data['question']
-            contexts = data['contexts']
+# --------------------------------------------------------------------------- #
+# Loop principal                                                              #
+# --------------------------------------------------------------------------- #
+logger.info("Generator iniciado ― aguardando mensagens…")
 
-            logger.info(f"Processando (ID: {request_id}): {question[:50]}...")
+for msg in pubsub.listen():
+    if msg["type"] != "message":
+        continue
 
-            # Gerar resposta
-            prompt = build_prompt(question, contexts)
-            answer = generate_response(prompt)
-            elapsed = time.time() - start_time
+    try:
+        start = time.perf_counter()
+        payload = json.loads(msg["data"])
 
-            logger.info(f"Resposta gerada em {elapsed:.2f}s (ID: {request_id})")
+        req_id: str = payload["id"]
+        question: str = payload["question"]
+        contexts: list[str] = payload["contexts"]
 
-            # Publicar resposta
-            r.set(f"response:{request_id}", json.dumps({
-                "id": request_id,
-                "question": question,
-                "answer": answer,
-                "status": "completed"
-            }), ex=300)
+        logger.info("ID %s ─ processando ‘%s…’", req_id, question[:60])
 
-        except json.JSONDecodeError:
-            logger.error(" Mensagem JSON inválida")
-        except Exception as e:
-            logger.error(f" Erro inesperado: {str(e)}", exc_info=True)
+        answer = generate(build_prompt(question, contexts))
+        elapsed = time.perf_counter() - start
+
+        redis_conn.set(
+            f"response:{req_id}",
+            json.dumps(
+                {
+                    "id": req_id,
+                    "question": question,
+                    "answer": answer,
+                    "status": "completed",
+                    "elapsed": elapsed,
+                }
+            ),
+            ex=300,
+        )
+        logger.info("ID %s ─ resposta pronta em %.2fs", req_id, elapsed)
+
+    except json.JSONDecodeError:
+        logger.error("Mensagem JSON inválida recebida: %s", msg)
+    except Exception: 
+        logger.exception("Erro inesperado no loop principal")
