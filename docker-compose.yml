@@ -18,7 +18,7 @@ services:
   generator:
     build:
       context: ./generator
-      dockerfile: Dockerfile
+      dockerfile: src/Dockerfile
     environment:
       - REDIS_HOST=redis
       - MODEL_PATH=/app/models/mistral.gguf     # <- bate com o volume

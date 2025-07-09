@@ -1,26 +1,29 @@
-FROM python:3.10-slim
+# Use uma imagem Debian bullseye 
+FROM python:3.10-bullseye
 
+# Diretório de trabalho dentro do container
 WORKDIR /app
 
-# Instalar dependências de compilação
-RUN apt-get update && \
-    apt-get install -y build-essential cmake && \
-    rm -rf /var/lib/apt/lists/*
+# Atualiza apt e instala ferramentas para build nativo
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    cmake \
+    libffi-dev \
+    git \
+    && rm -rf /var/lib/apt/lists/*
 
-ENV PYTHONDONTWRITEBYTECODE 1
-ENV PYTHONUNBUFFERED 1
+# Copia o requirements.txt para o container
+COPY requirements.txt /tmp/requirements.txt
 
-# Permitir instalação de pacotes do sistema
-ENV PIP_BREAK_SYSTEM_PACKAGES=1
+# Instala as dependências Python (incluindo llama-cpp-python)
+RUN pip install --upgrade pip setuptools wheel
+RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
-# Instalar dependências com build otimizado
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Copia o restante do código para dentro do container
+COPY . /app/
 
-# Copiar aplicação
-COPY ./src ./src
-
-# Criar diretório para modelos
+# Cria pasta para os modelos se ainda não existir
 RUN mkdir -p /app/models
 
-CMD ["python", "src/main.py"]
+# Comando padrão para rodar o generator
+CMD ["python", "-u", "src/main.py"]

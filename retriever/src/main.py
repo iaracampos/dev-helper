@@ -23,12 +23,11 @@ logger = logging.getLogger("retriever")
 # Configuração Redis 
 # --------------------------------------------------
 def get_redis_connection():
-    """Estabelece conexão com Redis com fallback automático"""
     hosts_to_try = [
-        'redis',        # Nome do serviço no Docker
-        'localhost',    # Para execução sem Docker
-        '127.0.0.1',    # Fallback local
-        'host.docker.internal'  # Para Docker no Windows/Mac
+        'redis',        
+        'localhost',    
+        '127.0.0.1',   
+        'host.docker.internal'  
     ]
     
     for host in hosts_to_try:
