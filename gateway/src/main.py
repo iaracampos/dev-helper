@@ -83,7 +83,6 @@ async def ask_question(q: Question):
 
 @app.get("/status/{request_id}")
 async def check_status(request_id: str):
-    """Endpoint para verificar o status de uma requisição específica"""
     request_data = r.get(f"request:{request_id}")
     if not request_data:
         raise HTTPException(status_code=404, detail="Requisição não encontrada ou expirada")
