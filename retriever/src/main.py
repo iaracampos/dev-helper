@@ -30,7 +30,7 @@ logger = logging.getLogger("retriever")
 
 
 def _connect_redis() -> redis.Redis | None:
-    """Tenta conectar no Redis; devolve None se não conseguir."""
+    
     try:
         r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB, decode_responses=True)
         # faz um ping 
@@ -92,13 +92,11 @@ class Retriever:
                 "Passe rebuild_if_missing=True para reconstruir ou execute o script de ingestão."
             )
     def search(self, query: str, top_k: int = TOP_K_DEFAULT) -> List[Tuple[float, Dict]]:
-        """
-        Devolve uma lista de (score, metadata) ordenada pelo melhor score.
-        """
+
         if not query.strip():
             return []
 
-        # Embedding da pergunta (usa Redis como cache se possível)
+        # Embedding da pergunta 
         qkey = f"emb:{query}"
         if self.redis is not None and self.redis.exists(qkey):
             query_emb = np.array(json.loads(self.redis.get(qkey)), dtype=np.float32)
@@ -123,12 +121,11 @@ class Retriever:
         return results
 
     def get_contexts(self, query: str, top_k: int = TOP_K_DEFAULT) -> List[str]:
-        """Retorna somente os textos (campo 'text') dos documentos mais próximos."""
+       
         return [m.get("text", "") for _, m in self.search(query, top_k)]
 
 
     def _rebuild_index(self) -> None:
-        """Reconstrói o índice a partir de `self.meta`."""
         if not self.meta:
             raise RuntimeError(
                 "Não há metadados para reconstruir o índice. "
