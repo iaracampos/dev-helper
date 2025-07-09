@@ -1,9 +1,7 @@
 version: '3.9'
 
 services:
-  # ------------------------------ #
-  # Redis      #
-  # ------------------------------ #
+
   redis:
     image: redis:7-alpine
     restart: unless-stopped
@@ -12,51 +10,40 @@ services:
     networks:
       - rag-net
 
-  # ------------------------------ #
-  # Generator – Llama‑cpp          #
-  # ------------------------------ #
   generator:
     build:
       context: ./generator
       dockerfile: src/Dockerfile
     environment:
       - REDIS_HOST=redis
-      - MODEL_PATH=/app/models/mistral.gguf     # <- bate com o volume
+      - MODEL_PATH=/app/models/mistral.gguf
       - N_CTX=2048
       - N_THREADS=4
       - N_GPU_LAYERS=0
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     volumes:
-      - ./generator/models:/app/models:ro       # <- só leitura
+      - ./generator/models:/app/models:ro
     depends_on:
       - redis
     networks:
       - rag-net
 
-  # ------------------------------ #
-  # Retriever – busca semântica    #
-  # ------------------------------ #
   retriever:
     build:
       context: ./retriever
-      dockerfile: Dockerfile
+      dockerfile: src/Dockerfile
     environment:
       - REDIS_HOST=redis
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     depends_on:
       - redis
-    ports:
-    - "8001:8001"   
     networks:
       - rag-net
 
-  # ------------------------------ #
-  # Gateway – FastAPI              #
-  # ------------------------------ #
   gateway:
     build:
       context: ./gateway
-      dockerfile: Dockerfile
+      dockerfile: src/Dockerfile
     ports:
       - "8000:8000"
     environment:
@@ -64,6 +51,7 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     depends_on:
       - redis
+      - retriever
     networks:
       - rag-net
 

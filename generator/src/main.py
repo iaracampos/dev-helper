@@ -18,11 +18,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger("generator")
 
-# --------------------------------------------------------------------------- #
-# Redis                                                                       #
-# --------------------------------------------------------------------------- #
+
 def connect_redis() -> redis.Redis:
-    """Tenta vários hosts até conseguir uma conexão Redis válida."""
+   
     for host in ("redis", "localhost", "127.0.0.1", "host.docker.internal"):
         try:
             r = redis.Redis(
@@ -44,9 +42,6 @@ redis_conn = connect_redis()
 pubsub = redis_conn.pubsub()
 pubsub.subscribe("generator_channel")
 
-# --------------------------------------------------------------------------- #
-# Modelo Llama‑cpp                                                            #
-# --------------------------------------------------------------------------- #
 
 docker_model = Path("/app/models/mistral.gguf")
 repo_model = Path(__file__).resolve().parent.parent / "models" / "mistral.gguf"
@@ -77,9 +72,6 @@ def load_model() -> Llama:
 
 llm = load_model()
 
-# --------------------------------------------------------------------------- #
-# Helpers                                                                     #
-# --------------------------------------------------------------------------- #
 STOP_TOKENS = ["~~", "[INST]"]
 
 
@@ -109,9 +101,7 @@ def generate(prompt: str) -> str:
         return "Erro ao gerar resposta."
 
 
-# --------------------------------------------------------------------------- #
-# Loop principal                                                              #
-# --------------------------------------------------------------------------- #
+
 logger.info("Generator iniciado ― aguardando mensagens…")
 
 for msg in pubsub.listen():
